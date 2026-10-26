@@ -23,7 +23,7 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
-set(PICO_BOARD pico2 CACHE STRING "Board type")
+set(PICO_BOARD pico2_w CACHE STRING "Board type")
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -42,11 +42,13 @@ pico_set_program_version(audio-proc "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(audio-proc 0)
-pico_enable_stdio_usb(audio-proc 0)
+pico_enable_stdio_usb(audio-proc 1)
 
 # Add the standard library to the build
 target_link_libraries(audio-proc
-        pico_stdlib)
+        pico_stdlib
+        pico_cyw43_arch_none
+        hardware_adc)
 
 # Add the standard include files to the build
 target_include_directories(audio-proc PRIVATE
