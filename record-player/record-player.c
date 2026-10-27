@@ -2,6 +2,8 @@
 //
 // Wiring:
 //   Pico GP15  -> XY-MOS PWM+ (TRIG/PWM)
+//   Pico GP16  -> Encoder Channel A Output
+//   Pico GP17  -> Encoder Channel B Output
 //   Pico GND   -> XY-MOS PWM- (GND)   <- common ground is required
 //   Motor PSU+ -> XY-MOS VIN+ / DC+
 //   Motor PSU- -> XY-MOS VIN- / DC-
@@ -10,15 +12,22 @@
 // A flyback diode across the motor (cathode to OUT+) is strongly recommended.
 
 #include <stdio.h>
+#include <stdint.h>
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
 
 #define MOTOR_PIN 15
+#define ENCODER_A_PIN 16
+#define ENCODER_B_PIN 17
 #define PWM_FREQ_HZ 1000  // XY-MOS handles up to ~20 kHz; raise if the motor whines
+#define MOTOR_SPEED 100  // percent, 0–100
 
 static uint slice_num;
 static uint16_t pwm_wrap;
+static volatile uint32_t a_count = 0;
+static volatile uint32_t b_count = 0;
+
 
 static void motor_init(uint32_t freq_hz) {
     gpio_set_function(MOTOR_PIN, GPIO_FUNC_PWM);
@@ -39,6 +48,7 @@ static void motor_init(uint32_t freq_hz) {
     pwm_set_enabled(slice_num, true);
 }
 
+//
 static void motor_set_speed(int percent) {
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
@@ -55,21 +65,71 @@ static void motor_ramp(int start, int end, uint32_t step_delay_ms) {
     }
 }
 
+//
 static void motor_stop(void) {
     pwm_set_gpio_level(MOTOR_PIN, 0);
 }
 
-#define MOTOR_SPEED 100  // percent, 0–100
+static void encoder_callback(uint gpio, uint32_t events) {
+    if (events & GPIO_IRQ_EDGE_RISE) {
+        if (gpio == ENCODER_A_PIN) {
+            a_count++;
+        } else if (gpio == ENCODER_B_PIN) {
+            b_count++;
+        }
+    }
+}
+
+// Initialize encoder pins
+static void encoder_init(void){
+    // Set encoder A and B as inputs
+    gpio_init(ENCODER_A_PIN);
+    gpio_init(ENCODER_B_PIN);
+    gpio_set_dir(ENCODER_A_PIN, GPIO_IN);
+    gpio_set_dir(ENCODER_B_PIN, GPIO_IN);
+    gpio_pull_up(ENCODER_A_PIN);
+    gpio_pull_up(ENCODER_B_PIN);
+    gpio_set_irq_enabled_with_callback(
+        ENCODER_A_PIN,
+        GPIO_IRQ_EDGE_RISE,
+        true,
+        encoder_callback
+    );
+
+    gpio_set_irq_enabled(
+        ENCODER_B_PIN,
+        GPIO_IRQ_EDGE_RISE,
+        true
+    );
+}
 
 int main(void) {
     stdio_init_all();
     motor_init(PWM_FREQ_HZ);
+    encoder_init();
 
     // Soft start to avoid a big current spike, then hold speed forever
     motor_ramp(0, MOTOR_SPEED, 20);
     printf("Running at %d%%\n", MOTOR_SPEED);
 
+    uint32_t last_a = 0;
+    uint32_t last_b = 0;
+
     while (true) {
-        tight_loop_contents();
+        sleep_ms(1000);
+
+        // TODO: Encoder readings are not working
+        // Connecting encoder C1/C2 to Pico GPIO caused the measured
+        // encoder supply voltage to drop from 3.3V to ~2.3V
+        
+        uint32_t a = a_count;
+        uint32_t b = b_count;
+
+        printf("A pulses/s=%lu  B pulses/s=%lu\n",
+            (unsigned long)(a - last_a),
+            (unsigned long)(b - last_b));
+
+        last_a = a;
+        last_b = b;
     }
 }
