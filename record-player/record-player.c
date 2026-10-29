@@ -23,6 +23,18 @@
 #define PWM_FREQ_HZ 1000  // XY-MOS handles up to ~20 kHz; raise if the motor whines
 #define MOTOR_SPEED 100  // percent, 0–100
 
+// Encoder & RPM
+#define TARGET_RPM (100.0f / 3.0f)
+#define ENCODER_PPR 7.0f
+#define GEAR_RATIO 298.0f
+#define PULSES_PER_REV (ENCODER_PPR * GEAR_RATIO)
+
+#define KP 0.5f
+#define KI 0.15f
+
+#define CONTROL_INTERVAL_MS 500
+#define BASE_PWM 67.0f
+
 static uint slice_num;
 static uint16_t pwm_wrap;
 static volatile uint32_t a_count = 0;
@@ -89,6 +101,7 @@ static void encoder_init(void){
     gpio_set_dir(ENCODER_B_PIN, GPIO_IN);
     gpio_pull_up(ENCODER_A_PIN);
     gpio_pull_up(ENCODER_B_PIN);
+    
     gpio_set_irq_enabled_with_callback(
         ENCODER_A_PIN,
         GPIO_IRQ_EDGE_RISE,
@@ -105,31 +118,62 @@ static void encoder_init(void){
 
 int main(void) {
     stdio_init_all();
+
     motor_init(PWM_FREQ_HZ);
     encoder_init();
 
+    float integral = 0.0f;
+    float pwm = BASE_PWM;
+
+    uint32_t last_count = a_count;
+
     // Soft start to avoid a big current spike, then hold speed forever
     motor_ramp(0, MOTOR_SPEED, 20);
-    printf("Running at %d%%\n", MOTOR_SPEED);
-
-    uint32_t last_a = 0;
-    uint32_t last_b = 0;
+    // printf("Running at %d%%\n", MOTOR_SPEED);
 
     while (true) {
-        sleep_ms(1000);
+        // wait one second
+        sleep_ms(CONTROL_INTERVAL_MS);
 
-        // TODO: Encoder readings are not working
-        // Connecting encoder C1/C2 to Pico GPIO caused the measured
-        // encoder supply voltage to drop from 3.3V to ~2.3V
+        // Measure actual motor speed
+        uint32_t current_count = a_count;
+        uint32_t pulses = current_count - last_count;
+        last_count = current_count;
+
+        float dt = CONTROL_INTERVAL_MS / 1000.0f;
+        float rpm = (pulses * 60.0f) / PULSES_PER_REV;
+
+        // Calculate error
+        float error = TARGET_RPM - rpm; 
+
+        // Integral term 
+        float candidate_integral = integral + error * dt; 
+
+        // Keep integral correction within 30 PWM points for stability
+        if (candidate_integral > 30.0f / KI)
+            candidate_integral = 30.0f / KI;
+
+        if (candidate_integral < -30.0f / KI)
+            candidate_integral = -30.0f / KI;
+
+        // Calculate PWM correction
+        float new_pwm = BASE_PWM + KP * error + KI * candidate_integral; 
         
-        uint32_t a = a_count;
-        uint32_t b = b_count;
+        if (!((new_pwm > 100.0f && error > 0) || (new_pwm < 0.0f && error < 0))) 
+        {
+            integral = candidate_integral;
+        }
 
-        printf("A pulses/s=%lu  B pulses/s=%lu\n",
-            (unsigned long)(a - last_a),
-            (unsigned long)(b - last_b));
+        pwm = BASE_PWM + KP * error + KI * integral;
 
-        last_a = a;
-        last_b = b;
+        // Limit PWM to valid range
+        if (pwm > 100.0f) pwm = 100.0f;
+        if (pwm < 0.0f) pwm = 0;
+
+        motor_set_speed((int)(pwm + 0.5f));
+        
+        // Print stats
+        printf("Target: %.2f | Actual: %.2f | PWM: %.1f%%\n",
+               TARGET_RPM, rpm, pwm);
     }
 }
