@@ -48,7 +48,9 @@ pico_enable_stdio_usb(audio-proc 1)
 target_link_libraries(audio-proc
         pico_stdlib
         pico_cyw43_arch_none
-        hardware_adc)
+        hardware_adc
+        hardware_irq
+        hardware_pwm)
 
 # Add the standard include files to the build
 target_include_directories(audio-proc PRIVATE

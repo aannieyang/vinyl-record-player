@@ -141,7 +141,7 @@ int main(void) {
         last_count = current_count;
 
         float dt = CONTROL_INTERVAL_MS / 1000.0f;
-        float rpm = (pulses * 60.0f) / PULSES_PER_REV;
+        float rpm = (pulses * 60.0f) / (PULSES_PER_REV * dt);
 
         // Calculate error
         float error = TARGET_RPM - rpm; 
