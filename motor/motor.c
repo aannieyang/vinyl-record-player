@@ -3,9 +3,12 @@
 // Changes vs. recordplayercode.c:
 //   - Fixed-rate control loop (CONTROL_PERIOD_MS). The encoder ISR never stops
 //     counting, so no pulses are lost while the main loop is busy printing.
-//   - RPM is measured edge-to-edge (edges / time between first and last edge),
-//     so it stays accurate with only a handful of edges per sample.
-//   - Float duty using the full PWM resolution; PWM at 20 kHz (inaudible).
+//   - Full quadrature decoding of encoder A and B (all 4 edges). Noise glitches
+//     on one channel produce a +1 then -1 and cancel out instead of piling up.
+//   - RPM is measured edge-to-edge (counts / time between first and last edge),
+//     so it stays accurate with only a handful of counts per sample.
+//   - Float duty using the full PWM resolution; PWM at 1 kHz (the XY-MOS
+//     optocoupler input is too slow for 20 kHz).
 //   - PI integral is stored as a duty term (i_term), so changing KI never
 //     kicks the output, and switching open loop -> PI is bumpless.
 //   - Line-based text commands + one CSV telemetry line per sample, for tuner.py.
@@ -26,8 +29,10 @@
 //
 // Wiring:
 //   Pico GP15  -> XY-MOS PWM+          Pico GND   -> XY-MOS PWM-
-//   Pico GP16  -> Encoder channel A
+//   Pico GP16  -> Encoder A            Pico GP17  -> Encoder B
+//   Pico 3V3   -> Encoder VCC          Pico GND   -> Encoder GND
 //   Motor PSU  -> XY-MOS VIN+/VIN-     Motor      -> XY-MOS OUT+/OUT-
+//   (0.1 uF ceramic cap across the motor terminals helps with brush noise)
 //
 // CMakeLists.txt needs: target_link_libraries(motor pico_stdlib hardware_pwm)
 //                       pico_enable_stdio_usb(motor 1)
@@ -36,6 +41,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "pico/stdlib.h"
 #include "hardware/pwm.h"
@@ -48,12 +54,16 @@
 
 #define MOTOR_PIN           15
 #define ENCODER_A_PIN       16
+#define ENCODER_B_PIN       17       // must be ENCODER_A_PIN + 1 (see encoder_init)
 
-#define PWM_FREQ_HZ         1000u
+#define PWM_FREQ_HZ         1000u    // XY-MOS optocoupler can't keep up at 20 kHz
 
-#define ENCODER_PPR         3.0f     // rising edges on channel A per MOTOR rev
-#define GEAR_RATIO          210.59f  // from 5117 datasheet
-#define PULSES_PER_REV      (ENCODER_PPR * GEAR_RATIO)
+// Pololu #5117: 12 CPR = 12 counts per MOTOR rev counting all edges of A and B
+#define ENCODER_CPR         12.0f
+#define GEAR_RATIO          210.59f
+#define TUNER_RPM           130.0f   // TODO what the tuner showed at 100% duty
+#define COUNTED_RPM         27.0f    // TODO turns you counted in 60 s
+#define COUNTS_PER_REV      (ENCODER_CPR * GEAR_RATIO * TUNER_RPM / COUNTED_RPM)
 
 #define CONTROL_PERIOD_MS   20       // 50 Hz control + telemetry
 #define STALL_TIMEOUT_US    250000u  // no edges for this long -> report 0 RPM
@@ -74,8 +84,9 @@ typedef enum { MODE_OPEN, MODE_PI } ctrl_mode_t;
 
 static uint16_t pwm_wrap;
 
-static volatile uint32_t edge_count = 0;     // written only by the ISR
+static volatile int32_t  enc_pos = 0;        // written only by the ISR
 static volatile uint32_t last_edge_us = 0;   // written only by the ISR
+static volatile uint8_t  enc_state = 0;      // (A << 1) | B
 
 static ctrl_mode_t mode = MODE_OPEN;
 static float duty_pct = 0.0f;
@@ -120,60 +131,87 @@ static void motor_set_duty(float pct)
 }
 
 // --------------------------------------------------
-// Encoder: count every rising edge on A, remember when the last one happened
+// Encoder: quadrature decoding on both edges of A and B
 // --------------------------------------------------
+
+// index = prev_state * 4 + new_state, state = (A << 1) | B.
+// Valid single steps give +1/-1; no change or an impossible jump (noise) gives 0.
+static const int8_t QDEC[16] = {
+     0, -1, +1,  0,
+    +1,  0,  0, -1,
+    -1,  0,  0, +1,
+     0, +1, -1,  0
+};
+
+static inline uint8_t encoder_read_state(void)
+{
+    uint32_t p = gpio_get_all();
+    return (uint8_t)((((p >> ENCODER_A_PIN) & 1u) << 1) | ((p >> ENCODER_B_PIN) & 1u));
+}
 
 static void encoder_isr(uint gpio, uint32_t events)
 {
-    if (gpio == ENCODER_A_PIN && (events & GPIO_IRQ_EDGE_RISE)) {
+    (void)gpio;
+    (void)events;
+    uint8_t s = encoder_read_state();
+    int8_t d = QDEC[(enc_state << 2) | s];
+    enc_state = s;
+    if (d != 0) {
+        enc_pos += d;
         last_edge_us = time_us_32();
-        edge_count++;
     }
 }
 
 static void encoder_init(void)
 {
-    gpio_init(ENCODER_A_PIN);
-    gpio_set_dir(ENCODER_A_PIN, GPIO_IN);
-    gpio_pull_up(ENCODER_A_PIN);
-    gpio_set_irq_enabled_with_callback(ENCODER_A_PIN, GPIO_IRQ_EDGE_RISE,
-                                       true, encoder_isr);
+    const uint32_t edges = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
+
+    for (uint pin = ENCODER_A_PIN; pin <= ENCODER_B_PIN; pin++) {
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_IN);
+        gpio_pull_up(pin);
+    }
+    enc_state = encoder_read_state();
+
+    gpio_set_irq_enabled_with_callback(ENCODER_A_PIN, edges, true, encoder_isr);
+    gpio_set_irq_enabled(ENCODER_B_PIN, edges, true);
 }
 
 // Edge-to-edge speed measurement. Uses the time between the last edge of the
 // previous sample and the last edge of this one, so there is no +/-1 pulse
 // quantization error and nothing is ever dropped.
-static uint32_t ref_count = 0;
+static int32_t ref_count = 0;
 static uint32_t ref_edge_us = 0;
 static bool have_ref = false;
 
 static void update_rpm(void)
 {
     uint32_t irq = save_and_disable_interrupts();
-    uint32_t count  = edge_count;
+    int32_t  count  = enc_pos;
     uint32_t edge_t = last_edge_us;
     restore_interrupts(irq);
 
-    uint32_t new_edges = count - ref_count;
+    // Direction doesn't matter for speed; abs() also handles reversed A/B wiring.
+    uint32_t new_edges = (uint32_t)abs(count - ref_count);
 
     if (new_edges > 0) {
         if (have_ref) {
             uint32_t span_us = edge_t - ref_edge_us;
             if (span_us > 0)
-                rpm = ((float)new_edges * 60.0e6f) / (PULSES_PER_REV * (float)span_us);
+                rpm = ((float)new_edges * 60.0e6f) / (COUNTS_PER_REV * (float)span_us);
         }
         ref_count = count;
         ref_edge_us = edge_t;
         have_ref = true;
     } else if (have_ref) {
-        // No edges this sample: speed can't be more than one edge's worth
+        // No counts this sample: speed can't be more than one count's worth
         // over the time since the last edge.
         uint32_t since_us = time_us_32() - ref_edge_us;
         if (since_us > STALL_TIMEOUT_US) {
             rpm = 0.0f;
             have_ref = false;
         } else if (since_us > 0) {
-            float bound = 60.0e6f / (PULSES_PER_REV * (float)since_us);
+            float bound = 60.0e6f / (COUNTS_PER_REV * (float)since_us);
             if (rpm > bound) rpm = bound;
         }
     }
