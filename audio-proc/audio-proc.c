@@ -16,20 +16,47 @@
 #define CAPTURE_LEN 1024     // ~21 ms of audio per capture sent to scope.py
 
 #define DIGITAL_GAIN 1       // raise if too quiet, lower if distorted
+#define RIAA_ENABLED 1       // 1 = apply RIAA playback EQ, 0 = flat (bypass)
 #define BEEP_HZ 440
 #define BEEP_MS 1000
 
 static uint16_t capture_buf[CAPTURE_LEN];
 static volatile uint capture_count = 0;
 
-// runs once per ADC sample: remove DC bias, apply gain, send to the amp, record for scope.py
+// RIAA playback de-emphasis (time constants 3180 us / 318 us / 75 us) as one biquad at 48 kHz.
+// Poles and the 318 us zero use the matched-z transform; the second zero was fitted so the
+// response stays within +/-0.25 dB of the ideal curve from 20 Hz to 20 kHz.
+// Normalized to 0 dB at 1 kHz: about +19.3 dB at 20 Hz, -19.6 dB at 20 kHz.
+// If SAMPLE_RATE_HZ changes, these coefficients have to be recomputed.
+#define RIAA_B0  0.214828211f
+#define RIAA_B1 -0.168766096f
+#define RIAA_B2 -0.030381978f
+#define RIAA_A1 -1.750935179f
+#define RIAA_A2  0.752518920f
+
+// direct form I biquad; the RP2350 FPU makes this a few dozen cycles per sample
+static inline float riaa_filter(float x)
+{
+    static float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    float y = RIAA_B0 * x + RIAA_B1 * x1 + RIAA_B2 * x2 - RIAA_A1 * y1 - RIAA_A2 * y2;
+    x2 = x1; x1 = x;
+    y2 = y1; y1 = y;
+    return y;
+}
+
+// runs once per ADC sample: remove DC bias, RIAA EQ, apply gain, send to the amp, record for scope.py
 static void adc_irq_handler(void)
 {
     static int32_t dc = 2048 << 8;   // running average of the bias point, 8 fractional bits
     uint16_t sample = adc_fifo_get(); // 12-bit
 
     dc += (((int32_t)sample << 8) - dc) >> 10;
-    int32_t s = ((int32_t)sample - (dc >> 8)) * DIGITAL_GAIN;
+    float x = (float)((int32_t)sample - (dc >> 8));
+#if RIAA_ENABLED
+    x = riaa_filter(x);
+#endif
+    // gain before converting back to int, so treble the EQ cut below 1 count isn't truncated away
+    int32_t s = (int32_t)(x * DIGITAL_GAIN);
 
     if (s > 2047) s = 2047;
     if (s < -2048) s = -2048;
