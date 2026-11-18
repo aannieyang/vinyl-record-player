@@ -1,0 +1,21 @@
+.program i2s_rx
+.side_set 2
+
+; Bit 0 = LRCK (GP19)
+; Bit 1 = BCK  (GP20)
+
+.wrap_target
+
+    set x, 30 side 0b00
+left_loop:
+    in pins, 1 side 0b10
+    jmp x-- left_loop side 0b00
+    in pins, 1 side 0b10
+
+    set x, 30 side 0b01
+right_loop:
+    in pins, 1 side 0b11
+    jmp x-- right_loop side 0b01
+    in pins, 1 side 0b11
+
+.wrap
