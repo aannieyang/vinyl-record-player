@@ -1,0 +1,29 @@
+; 32-bit-slot stereo I2S full duplex, single PIO state machine.
+; sideset pin 0 = LRCK (GP19), sideset pin 1 = BCK (GP20).
+; OUT pin = DAC DIN (GP22); IN pin = ADC DOUT (GP21).
+; 32 RX bits and 32 TX bits per channel. 256 PIO clocks per stereo frame.
+; Standard I2S: LRCK changes one bit clock before next channel's MSB.
+; PCM1808 must be in slave mode, 24-bit I2S, 64 BCK per stereo frame.
+.program audio_full_duplex
+.side_set 2
+    set x, 30 side 0b01
+.wrap_target
+right_loop:
+    out pins, 1 side 0b01  ; LRCK=1 BCK=0, set outgoing data
+    nop         side 0b11  ; BCK rises
+    in pins, 1  side 0b11  ; sample incoming data at BCK high
+    jmp x-- right_loop side 0b01  ; BCK falls, 31 iterations
+    out pins, 1 side 0b00  ; final bit, transition LRCK early
+    nop         side 0b10
+    in pins, 1  side 0b10
+    set x, 30   side 0b00
+left_loop:
+    out pins, 1 side 0b00
+    nop         side 0b10
+    in pins, 1  side 0b10
+    jmp x-- left_loop side 0b00
+    out pins, 1 side 0b01  ; final bit, transition LRCK early
+    nop         side 0b11
+    in pins, 1  side 0b11
+    set x, 30   side 0b01
+.wrap

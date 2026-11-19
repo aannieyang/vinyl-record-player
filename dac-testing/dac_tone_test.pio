@@ -1,0 +1,21 @@
+; Stereo I2S transmitter, 16 bits per channel, standard I2S timing.
+; Adapted from Raspberry Pi pico-extras audio_i2s.pio (BSD-3-Clause).
+; Two side-set pins: base GPIO = LRCK, base+1 = BCK.
+; One output pin = serial DIN. Each 32-bit TX FIFO word carries
+; left sample in upper 16 bits and right sample in lower 16 bits.
+.program dac_i2s
+.side_set 2
+
+; bit 1: LRCK high, BCK low/high
+bitloop1:
+    out pins, 1 side 0b10
+    jmp x-- bitloop1 side 0b11
+    out pins, 1 side 0b00
+    set x, 14 side 0b01
+; bit 0: LRCK low, BCK low/high
+bitloop0:
+    out pins, 1 side 0b00
+    jmp x-- bitloop0 side 0b01
+    out pins, 1 side 0b10
+public entry_point:
+    set x, 14 side 0b11
