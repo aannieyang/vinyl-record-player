@@ -1,0 +1,39 @@
+; Full-duplex I2S master: PCM1808 ADC in + PCM5102A DAC out, shared clocks.
+;
+; Same frame timing as adc-testing/pcm1808.pio (which is known to work):
+;   - LRCK changes on the BCK-low phase just before bit slot 0
+;   - 32 BCK per channel, 64 BCK per stereo frame
+;   - ADC MSB is captured in slot 1, so raw RX word bits 30..7 = 24-bit sample
+; The DAC sees the same framing, so its MSB must be sent in slot 1 too:
+; TX words must have the sample in bits 30..7 (bit 31 = sign extension).
+;
+; 4 PIO cycles per bit -> 256 PIO cycles per frame.
+;
+; Side-set bit 0 = LRCK (GP19), bit 1 = BCK (GP20)
+; IN pin  = ADC DOUT (GP21)
+; OUT pin = DAC DIN  (GP22)
+
+.program i2s_duplex
+.side_set 2
+
+.wrap_target
+    set x, 30          side 0b00   ; LRCK low = left, BCK low
+left_loop:
+    out pins, 1        side 0b00   ; BCK low: drive next DAC bit
+    nop                side 0b10   ; BCK rising edge (DAC latches)
+    in pins, 1         side 0b10   ; BCK high: sample ADC bit
+    jmp x-- left_loop  side 0b00   ; BCK falling edge
+    out pins, 1        side 0b00   ; last left bit
+    nop                side 0b10
+    in pins, 1         side 0b10
+
+    set x, 30          side 0b01   ; LRCK high = right, BCK low
+right_loop:
+    out pins, 1        side 0b01
+    nop                side 0b11
+    in pins, 1         side 0b11
+    jmp x-- right_loop side 0b01
+    out pins, 1        side 0b01   ; last right bit
+    nop                side 0b11
+    in pins, 1         side 0b11
+.wrap
