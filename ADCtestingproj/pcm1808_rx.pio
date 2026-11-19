@@ -1,0 +1,14 @@
+.program pcm1808_rx
+
+.wrap_target
+    wait 1 gpio 17          ; Wait for the right-channel slot
+    wait 0 gpio 17          ; LRCK falls one bit before the left MSB
+    wait 1 gpio 16          ; Skip the clock for that preceding bit
+    set x, 23
+
+read_bit:
+    wait 0 gpio 16
+    wait 1 gpio 16
+    in pins, 1
+    jmp x-- read_bit
+.wrap
