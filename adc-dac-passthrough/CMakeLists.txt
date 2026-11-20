@@ -59,10 +59,4 @@ target_include_directories(adc-dac-passthrough PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
-# Add any user requested libraries
-target_link_libraries(adc-dac-passthrough 
-        
-        )
-
 pico_add_extra_outputs(adc-dac-passthrough)
-

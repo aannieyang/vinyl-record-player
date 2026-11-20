@@ -1,39 +1,38 @@
-; Full-duplex I2S master: PCM1808 ADC in + PCM5102A DAC out, shared clocks.
+; Full-duplex I2S SLAVE: PCM1808 supplies BCK/LRCK to Pico and PCM5102A.
+; Pico still supplies ADC SCKI/MCLK independently through GPOUT0.
+; Physical Pico pins: 21=BCK/GP16, 22=LRCK/GP17, 24=ADC DOUT/GP18,
+; 25=DAC DIN/GP19. WAIT GPIO operands are absolute GPIO numbers.
 ;
-; Same frame timing as adc-testing/pcm1808.pio (which is known to work):
-;   - LRCK changes on the BCK-low phase just before bit slot 0
-;   - 32 BCK per channel, 64 BCK per stereo frame
-;   - ADC MSB is captured in slot 1, so raw RX word bits 30..7 = 24-bit sample
-; The DAC sees the same framing, so its MSB must be sent in slot 1 too:
-; TX words must have the sample in bits 30..7 (bit 31 = sign extension).
+; Run at clk_sys (120 MHz), not at MCLK: WAIT instructions follow the external
+; 3 MHz BCK. Never drive either clock pin. Reacquire a falling LRCK each frame
+; so startup in an arbitrary slot cannot permanently swap channels.
 ;
-; 4 PIO cycles per bit -> 256 PIO cycles per frame.
+; Capture/transmit 32 bits starting in the I2S delay slot after each LRCK edge:
+; RX/TX bits 30..7 hold signed PCM24; bit31 belongs to the previous channel.
+; TX bit31 and bits6..0 must be zero. Sample ADC after rising BCK and change
+; DAC DIN after falling BCK, while BCK is low.
 ;
-; Side-set bit 0 = LRCK (GP19), bit 1 = BCK (GP20)
-; IN pin  = ADC DOUT (GP21)
-; OUT pin = DAC DIN  (GP22)
-
+; Autopush/autopull may stall if the CPU falls behind. External clocks CANNOT
+; pause: that can corrupt data within the frame. Inspect RXSTALL/TXSTALL;
+; the next wrap reacquires the left boundary, but does not recover lost audio.
 .program i2s_duplex
-.side_set 2
 
 .wrap_target
-    set x, 30          side 0b00   ; LRCK low = left, BCK low
+    wait 1 gpio 17
+    wait 0 gpio 17       ; left transition, one BCK before the left MSB
+    set x, 31
 left_loop:
-    out pins, 1        side 0b00   ; BCK low: drive next DAC bit
-    nop                side 0b10   ; BCK rising edge (DAC latches)
-    in pins, 1         side 0b10   ; BCK high: sample ADC bit
-    jmp x-- left_loop  side 0b00   ; BCK falling edge
-    out pins, 1        side 0b00   ; last left bit
-    nop                side 0b10
-    in pins, 1         side 0b10
+    wait 0 gpio 16
+    out pins, 1
+    wait 1 gpio 16
+    in pins, 1
+    jmp x-- left_loop
 
-    set x, 30          side 0b01   ; LRCK high = right, BCK low
+    set x, 31
 right_loop:
-    out pins, 1        side 0b01
-    nop                side 0b11
-    in pins, 1         side 0b11
-    jmp x-- right_loop side 0b01
-    out pins, 1        side 0b01   ; last right bit
-    nop                side 0b11
-    in pins, 1         side 0b11
+    wait 0 gpio 16       ; next falling edge is the right transition
+    out pins, 1
+    wait 1 gpio 16
+    in pins, 1
+    jmp x-- right_loop
 .wrap
