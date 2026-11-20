@@ -18,21 +18,21 @@
 .program i2s_duplex
 
 .wrap_target
-    wait 1 gpio 17
-    wait 0 gpio 17       ; left transition, one BCK before the left MSB
+    wait 1 gpio 19
+    wait 0 gpio 19       ; left transition, one BCK before the left MSB
     set x, 31
 left_loop:
-    wait 0 gpio 16
+    wait 0 gpio 20
     out pins, 1
-    wait 1 gpio 16
+    wait 1 gpio 20
     in pins, 1
     jmp x-- left_loop
 
     set x, 31
 right_loop:
-    wait 0 gpio 16       ; next falling edge is the right transition
+    wait 0 gpio 20       ; next falling edge is the right transition
     out pins, 1
-    wait 1 gpio 16
+    wait 1 gpio 20
     in pins, 1
     jmp x-- right_loop
 .wrap
